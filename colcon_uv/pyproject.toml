@@ -26,6 +26,10 @@ classifiers = [
 dependencies = [
     "colcon-core~=0.6",
     "tomli>=1.2.0",
+    # ROS Humble's rosidl_adapter uses em.BUFFERED_OPT which EmPy 4 removed.
+    # Newer colcon-core advertises EmPy>=3; cap to <4 on Humble-class Pythons
+    # so the transitive pip resolve picks a 3.x release.
+    "EmPy<4 ; python_version < '3.12'",
 ]
 
 [project.urls]

@@ -226,10 +226,12 @@ name = "test_package"
 
             # Function should handle failure gracefully without raising to caller
             try:
-                self.install_dependencies(desc, install_base, merge_install)
+                self.install_dependencies_from_descriptor(
+                    desc, install_base, merge_install
+                )
                 # If no exception raised, that's fine - graceful handling
-            except CalledProcessError:
-                # If CalledProcessError propagates, that's also expected behavior
+            except (CalledProcessError, SystemExit):
+                # If CalledProcessError or SystemExit propagates, that's also expected
                 pass
 
     def test_install_dependencies_no_pyproject(self):
@@ -314,6 +316,87 @@ name = "test_package"
 
             # Should still work with merge install
             self.assertTrue(mock_run.called)
+
+
+class TestSharedVenvPath(unittest.TestCase):
+    """Test [tool.colcon-uv-ros].venv-path support."""
+
+    def setUp(self):
+        from colcon_uv.dependencies.install import install_dependencies_from_descriptor
+
+        self.install_dependencies_from_descriptor = install_dependencies_from_descriptor
+
+    @patch("subprocess.run")
+    def test_uses_external_venv_when_venv_path_set(self, mock_run):
+        """venv-path points colcon-uv at an existing venv; no `uv venv` call."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+
+            shared_venv = temp_path / "shared-venv"
+            (shared_venv / "bin").mkdir(parents=True)
+            (shared_venv / "bin" / "python").write_text("")
+
+            pkg_dir = temp_path / "pkg"
+            pkg_dir.mkdir()
+            (pkg_dir / "pyproject.toml").write_text(
+                '[project]\nname = "pkg"\n'
+                "dependencies = []\n\n"
+                "[tool.colcon-uv-ros]\n"
+                'name = "pkg"\n'
+                'venv-path = "../shared-venv"\n'
+            )
+
+            desc = PackageDescriptor(pkg_dir)
+            desc.name = "pkg"
+
+            mock_run.return_value = MagicMock(returncode=0)
+            self.install_dependencies_from_descriptor(
+                desc, temp_path / "install", False
+            )
+
+            # No subprocess invocation should be `uv venv ...` (creation).
+            for call in mock_run.call_args_list:
+                args = call[0][0] if call[0] else []
+                self.assertNotEqual(
+                    args[:2],
+                    ["uv", "venv"],
+                    f"colcon-uv should not create a venv when venv-path is set; got {args}",
+                )
+
+            # The pip install command must target the shared venv's Python.
+            pip_calls = [
+                c
+                for c in mock_run.call_args_list
+                if c[0] and "pip" in c[0][0] and "install" in c[0][0]
+            ]
+            self.assertTrue(pip_calls, "expected a `uv pip install` call")
+            cmd = pip_calls[0][0][0]
+            python_idx = cmd.index("--python")
+            self.assertEqual(cmd[python_idx + 1], str(shared_venv / "bin" / "python"))
+
+    @patch("subprocess.run")
+    def test_missing_external_venv_exits_with_error(self, mock_run):
+        """venv-path pointing at a non-existent path fails fast."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+
+            pkg_dir = temp_path / "pkg"
+            pkg_dir.mkdir()
+            (pkg_dir / "pyproject.toml").write_text(
+                '[project]\nname = "pkg"\n'
+                "[tool.colcon-uv-ros]\n"
+                'name = "pkg"\n'
+                'venv-path = "../does-not-exist"\n'
+            )
+
+            desc = PackageDescriptor(pkg_dir)
+            desc.name = "pkg"
+
+            mock_run.return_value = MagicMock(returncode=0)
+            with self.assertRaises(SystemExit):
+                self.install_dependencies_from_descriptor(
+                    desc, temp_path / "install", False
+                )
 
 
 if __name__ == "__main__":

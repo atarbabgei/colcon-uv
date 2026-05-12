@@ -21,6 +21,8 @@ Intended, but not limited, to use with **ROS 2**. This extension provides a mode
 
 **Important**: This extension must be installed in the same environment as colcon to be discoverable by colcon's plugin system. Typically this means system-wide installation.
 
+> ROS Humble compatibility: colcon-uv pins `EmPy<4` on Python 3.10/3.11 so the transitive resolve can't pull EmPy 4 (which breaks Humble's `rosidl_adapter`). No `--no-deps` workaround needed. Add `--no-deps` if you'd prefer to leave the apt-installed `python3-colcon-core` / `python3-empy` / `python3-tomli` fully in charge.
+
 ### Install from PyPi (last tagged version)
 
 ```bash
@@ -35,16 +37,16 @@ uv pip install --system --break-system-packages colcon-uv
 
 ```bash
 # Using pip
-pip install git+https://github.com/nzlz/colcon-uv.git#subdirectory=colcon_uv --break-system-packages
+pip install git+https://github.com/atarbabgei/colcon-uv.git#subdirectory=colcon_uv --break-system-packages
 
 # Using uv
-uv pip install --system --break-system-packages git+https://github.com/nzlz/colcon-uv.git#subdirectory=colcon_uv
+uv pip install --system --break-system-packages git+https://github.com/atarbabgei/colcon-uv.git#subdirectory=colcon_uv
 ```
 
 ### Install from cloned source (local development)
 
 ```bash
-pip install --break-system-packages --target /usr/lib/python3/dist-packages -e colcon_uv
+pip install --user --break-system-packages -e colcon_uv
 ```
 
 ## Quick Start

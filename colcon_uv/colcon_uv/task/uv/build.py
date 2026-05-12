@@ -3,11 +3,15 @@
 import shutil
 from pathlib import Path
 
+import tomli
 from colcon_core.logging import colcon_logger
 from colcon_core.plugin_system import satisfies_version
 from colcon_core.task import TaskExtensionPoint
 
-from colcon_uv.dependencies.install import install_dependencies_from_descriptor
+from colcon_uv.dependencies.install import (
+    install_dependencies_from_descriptor,
+    resolve_venv_path,
+)
 
 logger = colcon_logger.getChild("colcon.uv.task.build")
 
@@ -30,49 +34,38 @@ class UvBuildTask(TaskExtensionPoint):
             'e.g. --uv-args " --help"',
         )
 
+    def _read_pyproject(self) -> dict:
+        try:
+            with open(self.context.pkg.path / "pyproject.toml", "rb") as f:
+                return tomli.load(f)
+        except FileNotFoundError:
+            return {}
+
     async def build(self, *, additional_hooks=None):
-        pkg = self.context.pkg
-        args = self.context.args
-
-        # Install package with all dependencies (runtime, optional, and dependency groups)
-        # This uses uv pip install to achieve dependency and package installation
-        # similar to uv sync, but without lockfiles
         logger.info("Installing package with all dependencies...")
-        install_dependencies_from_descriptor(pkg, Path(args.install_base), False)
+        install_dependencies_from_descriptor(
+            self.context.pkg, Path(self.context.args.install_base), False
+        )
 
-        # Handle ROS-specific stuff (data files, environment hooks, etc.)
         return_code = await self._add_data_files()
         if return_code != 0:
             return return_code
 
-        # Create executable symlinks for ROS 2
         self._create_executable_symlinks()
-
-        # Add environment hooks for ROS
         self._create_environment_hooks()
 
     async def _add_data_files(self) -> int:
-        """Install data files based on the [tool.colcon-uv-ros.data-files] table."""
+        """Install files declared in [tool.colcon-uv-ros.data-files]."""
         pkg = self.context.pkg
-        args = self.context.args
+        install_base = Path(self.context.args.install_base)
 
-        pyproject_toml = pkg.path / "pyproject.toml"
-
-        try:
-            import tomli
-
-            with open(pyproject_toml, "rb") as f:
-                data = tomli.load(f)
-
-            if "tool" not in data or "colcon-uv-ros" not in data["tool"]:
-                return 0
-
-            uv_config = data["tool"]["colcon-uv-ros"]
-            if "data-files" not in uv_config:
-                return 0
-
-            data_files = uv_config["data-files"]
-        except (ImportError, FileNotFoundError, KeyError):
+        data_files = (
+            self._read_pyproject()
+            .get("tool", {})
+            .get("colcon-uv-ros", {})
+            .get("data-files")
+        )
+        if data_files is None:
             return 0
 
         if not isinstance(data_files, dict):
@@ -84,75 +77,63 @@ class UvBuildTask(TaskExtensionPoint):
                 logger.error(f"Field '{destination}' in data-files must be an array")
                 return 1
 
-            dest_path = Path(args.install_base) / destination
+            dest_path = install_base / destination
             dest_path.mkdir(parents=True, exist_ok=True)
 
             for source in sources:
                 source_path = pkg.path / Path(source)
-                if source_path.exists():
-                    if source_path.is_dir():
-                        try:
-                            shutil.copytree(
-                                source_path,
-                                dest_path / source_path.name,
-                                dirs_exist_ok=True,
-                            )
-                        except shutil.Error:
-                            # Ignore errors that happen when source and dest are the same file
-                            # This is common with --symlink-install
-                            pass
-                    else:
-                        try:
-                            shutil.copy2(source_path, dest_path)
-                        except shutil.SameFileError:
-                            pass
+                if not source_path.exists():
+                    continue
+                if source_path.is_dir():
+                    try:
+                        shutil.copytree(
+                            source_path,
+                            dest_path / source_path.name,
+                            dirs_exist_ok=True,
+                        )
+                    except shutil.Error:
+                        # --symlink-install can leave source == dest.
+                        pass
+                else:
+                    try:
+                        shutil.copy2(source_path, dest_path)
+                    except shutil.SameFileError:
+                        pass
 
         return 0
 
     def _create_executable_symlinks(self):
-        """Create symlinks for executables in the standard ROS 2 location."""
+        """Symlink each [project.scripts] entry into install/<pkg>/lib/<pkg>/ for ros2 run/launch."""
         pkg = self.context.pkg
-        args = self.context.args
+        install_base = Path(self.context.args.install_base)
+        pyproject = self._read_pyproject()
 
-        # Read pyproject.toml to get executable entry points
-        pyproject_toml = pkg.path / "pyproject.toml"
-        if not pyproject_toml.exists():
+        scripts = pyproject.get("project", {}).get("scripts", {})
+        if not scripts:
             return
 
-        try:
-            import tomli
-
-            with open(pyproject_toml, "rb") as f:
-                data = tomli.load(f)
-
-            if "project" not in data or "scripts" not in data["project"]:
-                return
-
-            scripts = data["project"]["scripts"]
-        except (ImportError, FileNotFoundError, KeyError):
-            return
-
-        # Create lib/package_name directory for executables
-        lib_dir = Path(args.install_base) / "lib" / pkg.name
+        lib_dir = install_base / "lib" / pkg.name
         lib_dir.mkdir(parents=True, exist_ok=True)
+        venv_bin = resolve_venv_path(pyproject, pkg.path, install_base) / "bin"
 
-        # Create symlinks for each executable
-        venv_bin = Path(args.install_base) / "venv" / "bin"
-
-        for script_name, _entry_point in scripts.items():
+        for script_name in scripts:
             venv_executable = venv_bin / script_name
             ros_executable = lib_dir / script_name
 
-            if venv_executable.exists():
-                # Remove existing symlink if it exists
-                if ros_executable.exists() or ros_executable.is_symlink():
-                    ros_executable.unlink()
-
-                # Create symlink
-                ros_executable.symlink_to(venv_executable)
-                logger.info(
-                    f"Created executable symlink: {ros_executable} -> {venv_executable}"
+            if not venv_executable.exists():
+                logger.warning(
+                    f"Entry-point script {venv_executable} not found; "
+                    f"`ros2 run {pkg.name} {script_name}` will not work. "
+                    f"Did `uv pip install` complete successfully?"
                 )
+                continue
+
+            if ros_executable.exists() or ros_executable.is_symlink():
+                ros_executable.unlink()
+            ros_executable.symlink_to(venv_executable)
+            logger.info(
+                f"Created executable symlink: {ros_executable} -> {venv_executable}"
+            )
 
     def _create_environment_hooks(self):
         """Create ROS environment hooks."""
