@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import List, Optional
 
 import tomli
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
+from packaging.version import InvalidVersion, Version
 
 logger = logging.getLogger("colcon.uv.dependencies")
 
@@ -180,13 +182,47 @@ def _get_index_flags(project: UvPackage) -> List[str]:
     return flags
 
 
+def resolve_venv_path(
+    pyproject_data: dict, project_path: Path, install_base: Path
+) -> Path:
+    """Resolve the venv location for a project.
+
+    Returns ``[tool.colcon-uv-ros] venv-path`` resolved relative to the
+    project directory when set, otherwise the default ``install_base/venv``.
+
+    Setting venv-path lets a workspace point every package at one shared
+    environment (e.g. a repo-root ``.venv`` managed by ``uv sync``) instead
+    of building a per-package copy, which otherwise duplicates large
+    dependency trees and can resolve them to different versions than the
+    environment the user actually develops and tests against.
+
+    Takes the raw pyproject dict rather than a UvPackage so the build task
+    can resolve the same path without constructing one — both the dependency
+    install and the console-script symlinks must agree on where the venv is.
+    """
+    uv_ros_config = pyproject_data.get("tool", {}).get("colcon-uv-ros", {})
+    venv_path_str = uv_ros_config.get("venv-path")
+    if venv_path_str:
+        return (project_path / venv_path_str).resolve()
+    return install_base / "venv"
+
+
 def _resolve_python_version(project: UvPackage) -> str:
     """Resolve the Python version to use for a project's virtual environment.
 
     Checks in order:
       1. .python-version file in the project directory
-      2. requires-python field in pyproject.toml
-      3. The interpreter running colcon (sys.executable)
+      2. The interpreter running colcon, if it satisfies requires-python
+      3. requires-python field in pyproject.toml
+      4. The interpreter running colcon (sys.executable)
+
+    Step 2 matters because the venv is created with --system-site-packages so
+    that system ROS packages (rclpy and friends) are importable. Those are
+    built for the Python running colcon, so handing uv a bare specifier like
+    ">=3.10,<3.13" — which it may satisfy by selecting or downloading a
+    different interpreter — silently breaks those imports. Preferring
+    colcon's own interpreter whenever it is in range avoids the mismatch
+    rather than only warning about it afterwards.
     """
     # 1. .python-version (uv / pyenv convention)
     python_version_file = project.path / ".python-version"
@@ -204,11 +240,26 @@ def _resolve_python_version(project: UvPackage) -> str:
             logger.info(f"Using Python version from .python-version: {version}")
             return version
 
-    # 2. requires-python from pyproject.toml
+    # 2/3. requires-python from pyproject.toml — prefer colcon's own
+    # interpreter when it satisfies the specifier (see docstring).
     requires_python = project.pyproject_data.get("project", {}).get(
         "requires-python", ""
     )
     if requires_python:
+        try:
+            current = Version(
+                f"{sys.version_info.major}.{sys.version_info.minor}."
+                f"{sys.version_info.micro}"
+            )
+            if current in SpecifierSet(requires_python):
+                logger.info(
+                    f"Using colcon's Python {current} (satisfies "
+                    f"requires-python {requires_python}): {sys.executable}"
+                )
+                return sys.executable
+        except (InvalidSpecifier, InvalidVersion) as e:
+            logger.debug(f"Could not parse requires-python {requires_python!r}: {e}")
+
         logger.info(f"Using requires-python from pyproject.toml: {requires_python}")
         return requires_python
 
@@ -233,14 +284,29 @@ def install_dependencies(
     # Create the install directory first
     install_base.mkdir(parents=True, exist_ok=True)
 
-    # Venv path - this should be /install/PACKAGE_NAME/venv/
-    venv_path = install_base / "venv"
+    # Venv path - install/PACKAGE_NAME/venv by default, or an existing venv
+    # shared with the workspace when [tool.colcon-uv-ros] venv-path is set.
+    venv_path = resolve_venv_path(project.pyproject_data, project.path, install_base)
+    uses_external_venv = venv_path != install_base / "venv"
+
+    if uses_external_venv:
+        # A shared venv is owned by whatever created it (typically `uv sync`),
+        # so never create or recreate it here — that would silently diverge
+        # from the environment the user actually manages.
+        if not (venv_path / "bin" / "python").exists():
+            logger.error(
+                f"venv-path {venv_path} does not exist. Create it first "
+                f"(e.g. `uv sync`, or `uv venv {venv_path}`) before running "
+                f"colcon build."
+            )
+            sys.exit(1)
+        logger.info(f"Using shared venv from venv-path: {venv_path}")
 
     # --system-site-packages is needed because ROS 2 packages like rclpy are installed
     # system-wide (not available on PyPI) and our nodes need access to them
     # Skip recreation if the venv already exists so incremental builds are fast
     # and pre-seeded packages are not clobbered.
-    if not (venv_path / "bin" / "python").exists():
+    if not uses_external_venv and not (venv_path / "bin" / "python").exists():
         # Determine the Python version for the virtual environment.
         # Priority:
         #   1. .python-version file in the project directory (uv convention)

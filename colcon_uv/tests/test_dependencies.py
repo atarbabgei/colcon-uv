@@ -1,6 +1,7 @@
 """Tests for UV dependencies installation."""
 
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -153,12 +154,30 @@ class TestResolvePythonVersion(unittest.TestCase):
         )
         self.assertEqual(self._resolve_python_version(pkg), "3.10")
 
-    def test_requires_python_when_no_version_file(self):
+    def test_colcon_interpreter_preferred_when_it_satisfies_requires_python(self):
+        """A satisfied requires-python must not send uv looking for another
+        interpreter — the venv uses --system-site-packages, so system ROS
+        packages are only importable on colcon's own Python."""
+        major, minor = sys.version_info.major, sys.version_info.minor
         pkg = self._make_package(
-            '[project]\nrequires-python = ">=3.8,<3.11"\n'
+            f'[project]\nrequires-python = ">={major}.{minor},<{major}.{minor + 1}"\n'
             '[tool.colcon-uv-ros]\nname = "test"'
         )
-        self.assertEqual(self._resolve_python_version(pkg), ">=3.8,<3.11")
+        self.assertEqual(self._resolve_python_version(pkg), sys.executable)
+
+    def test_requires_python_used_when_colcon_interpreter_out_of_range(self):
+        pkg = self._make_package(
+            '[project]\nrequires-python = ">=99.0"\n'
+            '[tool.colcon-uv-ros]\nname = "test"'
+        )
+        self.assertEqual(self._resolve_python_version(pkg), ">=99.0")
+
+    def test_unparseable_requires_python_falls_back_to_the_specifier(self):
+        pkg = self._make_package(
+            '[project]\nrequires-python = "not-a-specifier"\n'
+            '[tool.colcon-uv-ros]\nname = "test"'
+        )
+        self.assertEqual(self._resolve_python_version(pkg), "not-a-specifier")
 
     def test_multiline_python_version_uses_first(self):
         pkg = self._make_package(
@@ -170,6 +189,55 @@ class TestResolvePythonVersion(unittest.TestCase):
     def test_falls_back_to_colcon_interpreter(self):
         pkg = self._make_package('[tool.colcon-uv-ros]\nname = "test"')
         self.assertEqual(self._resolve_python_version(pkg), sys.executable)
+
+
+class TestResolveVenvPath(unittest.TestCase):
+    """Test _resolve_venv_path helper."""
+
+    def setUp(self):
+        from colcon_uv.dependencies.install import (
+            UvPackage,
+            resolve_venv_path,
+        )
+
+        self.UvPackage = UvPackage
+        self._resolve_venv_path = resolve_venv_path
+        self._tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _make_package(self, pyproject_content):
+        pkg_dir = Path(self._tmpdir) / "pkg"
+        pkg_dir.mkdir(exist_ok=True)
+        (pkg_dir / "pyproject.toml").write_text(pyproject_content)
+        return self.UvPackage(pkg_dir)
+
+    def test_defaults_to_install_base_venv(self):
+        pkg = self._make_package('[tool.colcon-uv-ros]\nname = "test"')
+        install_base = Path(self._tmpdir) / "install" / "test"
+        self.assertEqual(
+            self._resolve_venv_path(pkg.pyproject_data, pkg.path, install_base), install_base / "venv"
+        )
+
+    def test_venv_path_is_resolved_relative_to_the_project(self):
+        pkg = self._make_package(
+            '[tool.colcon-uv-ros]\nname = "test"\nvenv-path = "../shared/.venv"'
+        )
+        install_base = Path(self._tmpdir) / "install" / "test"
+        self.assertEqual(
+            self._resolve_venv_path(pkg.pyproject_data, pkg.path, install_base),
+            (Path(self._tmpdir) / "shared" / ".venv").resolve(),
+        )
+
+    def test_absolute_venv_path_is_honoured(self):
+        pkg = self._make_package(
+            '[tool.colcon-uv-ros]\nname = "test"\nvenv-path = "/opt/shared-venv"'
+        )
+        install_base = Path(self._tmpdir) / "install" / "test"
+        self.assertEqual(
+            self._resolve_venv_path(pkg.pyproject_data, pkg.path, install_base), Path("/opt/shared-venv")
+        )
 
 
 class TestDependenciesInstall(unittest.TestCase):

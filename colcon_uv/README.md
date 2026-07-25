@@ -46,6 +46,30 @@ test_depend = ["qux_package"]        # Test-time only dependency
 
 **Important**: ROS system libraries like `rclpy`, `geometry_msgs`, `std_msgs`, etc. should be listed here so they are resolved from the system installation rather than being installed into the virtual environment.
 
+### Sharing One Virtual Environment (`venv-path`)
+
+By default each package gets its own `install/<package>/venv`. In a workspace
+whose Python dependencies are already managed by `uv sync` at the repo root,
+that duplicates the whole dependency tree per package — and, because the
+per-package venv resolves independently, it can pick different versions than
+the environment you develop and test in (a heavy dependency like `torch` can
+land on a different CUDA build entirely).
+
+Point a package at an existing venv instead:
+
+```toml
+[tool.colcon-uv-ros]
+name = "my_package"
+
+# Relative paths resolve against the package directory; absolute paths work too.
+venv-path = "../../../.venv"
+```
+
+The referenced venv must already exist — colcon will not create or recreate
+it, since it belongs to whatever manages it (typically `uv sync`). If it is
+missing the build fails with a message telling you to create it first, rather
+than silently building a second environment.
+
 ### Package Source Configuration
 
 Control where `uv pip install` fetches packages from. This is essential for platforms with custom-built wheels (e.g., NVIDIA Jetson with CUDA-specific torch builds) or private package indexes.

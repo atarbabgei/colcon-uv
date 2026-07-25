@@ -136,23 +136,39 @@ class UvBuildTask(TaskExtensionPoint):
         lib_dir = Path(args.install_base) / "lib" / pkg.name
         lib_dir.mkdir(parents=True, exist_ok=True)
 
-        # Create symlinks for each executable
-        venv_bin = Path(args.install_base) / "venv" / "bin"
+        # Create symlinks for each executable. The venv may be the default
+        # install_base/venv or a shared one named by venv-path; resolve it the
+        # same way the dependency install did, or the symlinks would point
+        # into a directory that was never created.
+        from colcon_uv.dependencies.install import resolve_venv_path
+
+        venv_bin = (
+            resolve_venv_path(data, pkg.path, Path(args.install_base)) / "bin"
+        )
 
         for script_name, _entry_point in scripts.items():
             venv_executable = venv_bin / script_name
             ros_executable = lib_dir / script_name
 
-            if venv_executable.exists():
-                # Remove existing symlink if it exists
-                if ros_executable.exists() or ros_executable.is_symlink():
-                    ros_executable.unlink()
-
-                # Create symlink
-                ros_executable.symlink_to(venv_executable)
-                logger.info(
-                    f"Created executable symlink: {ros_executable} -> {venv_executable}"
+            if not venv_executable.exists():
+                # Silently skipping here used to leave lib/<pkg>/ empty, so
+                # `ros2 run` failed with no indication of why.
+                logger.warning(
+                    f"Entry-point script {venv_executable} not found; "
+                    f"`ros2 run {pkg.name} {script_name}` will not work. "
+                    f"Did `uv pip install` complete successfully?"
                 )
+                continue
+
+            # Remove existing symlink if it exists
+            if ros_executable.exists() or ros_executable.is_symlink():
+                ros_executable.unlink()
+
+            # Create symlink
+            ros_executable.symlink_to(venv_executable)
+            logger.info(
+                f"Created executable symlink: {ros_executable} -> {venv_executable}"
+            )
 
     def _create_environment_hooks(self):
         """Create ROS environment hooks."""

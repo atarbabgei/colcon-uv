@@ -142,6 +142,9 @@ devel/
 .uv/
 uv.lock
 
+# Test artifacts created by pytest fixtures
+colcon_uv/share/
+
 # Docker
 .dockerignore
 
