@@ -35,10 +35,10 @@ uv pip install --system --break-system-packages colcon-uv
 
 ```bash
 # Using pip
-pip install git+https://github.com/nzlz/colcon-uv.git#subdirectory=colcon_uv --break-system-packages
+pip install git+https://github.com/atarbabgei/colcon-uv.git#subdirectory=colcon_uv --break-system-packages
 
 # Using uv
-uv pip install --system --break-system-packages git+https://github.com/nzlz/colcon-uv.git#subdirectory=colcon_uv
+uv pip install --system --break-system-packages git+https://github.com/atarbabgei/colcon-uv.git#subdirectory=colcon_uv
 ```
 
 ### Install from cloned source (local development)
